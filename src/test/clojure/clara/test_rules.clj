@@ -16,7 +16,8 @@
             [clara.sample-ruleset-seq :as srs]
             [clara.order-ruleset :as order-rules]
             [schema.test]
-            [clara.tools.testing-utils :as tu])
+            [schema.core :as sc]
+            [clara.tools.testing-utils :as tu :refer [assert-ex-data]])
   (:import [clara.rules.testfacts Temperature WindSpeed Cold Hot TemperatureHistory
             ColdAndWindy LousyWeather First Second Third Fourth FlexibleFields]
            [clara.rules.engine
@@ -39,54 +40,6 @@
 
 (defn- has-fact? [token fact]
   (some #{fact} (map first (:matches token))))
-
-(defn ex-data-search [^Exception e edata]
-  (loop [non-matches []
-         e e]
-    (cond
-      ;; Found match.
-      (= edata
-         (select-keys (ex-data e)
-                      (keys edata)))
-      :success
-
-      ;; Keep searching, record any non-matching ex-data.
-      (.getCause e)
-      (recur (if-let [ed (ex-data e)]
-               (conj non-matches ed)
-               non-matches)
-             (.getCause e))
-
-      ;; Can't find a match.
-      :else
-      non-matches)))
-
-(defn get-all-ex-data
-  "Walk a Throwable chain and return a sequence of all data maps
-  from any ExceptionInfo instances in that chain."
-  [e]
-  (let [get-ex-chain (fn get-ex-chain [e]
-                       (if-let [cause (.getCause e)]
-                         (conj (get-ex-chain cause) e)
-                         [e]))]
-
-    (map ex-data
-         (filter (partial instance? clojure.lang.IExceptionInfo)
-                 (get-ex-chain e)))))
-
-(defmacro assert-ex-data [expected-ex-data form]
-  `(try
-     ~form
-     (is false
-         (str "Exception expected to be thrown when evaluating: " \newline
-              '~form))
-     (catch Exception e#
-       (let [res# (ex-data-search e# ~expected-ex-data)]
-         (is (= :success res#)
-             (str "Exception msg found: " \newline
-                  e# \newline
-                  "Non matches found: " \newline
-                  res#))))))
 
 (deftest test-malformed-binding
   ;; Test binding with no value.
@@ -151,285 +104,6 @@
    :convert-return-fn (fn [[value count]] (if (= 0 count)
                                             nil
                                             (/ value count)))))
-
-(deftest test-simple-negation
-  (let [not-cold-query (dsl/parse-query [] [[:not [Temperature (< temperature 20)]]])
-
-        session  (mk-session [not-cold-query])
-
-        session-with-temp (-> session
-                              (insert (->Temperature 10 "MCI"))
-                              fire-rules)
-        session-retracted (-> session-with-temp
-                              (retract (->Temperature 10 "MCI"))
-                              fire-rules)
-        session-with-partial-retraction (-> session
-                                            (insert (->Temperature 10 "MCI")
-                                                    (->Temperature 15 "MCI"))
-                                            (retract (->Temperature 10 "MCI"))
-                                            fire-rules)]
-
-    ;; No facts for the above criteria exist, so we should see a positive result
-    ;; with no bindings.
-    (is (= #{{}}
-           (set (query session not-cold-query))))
-
-    ;; Inserting an item into the sesion should invalidate the negation.
-    (is (empty? (query session-with-temp
-                       not-cold-query)))
-
-    ;; Retracting the inserted item should make the negation valid again.
-    (is (= #{{}}
-           (set (query session-retracted not-cold-query))))
-
-    ;; Some but not all items were retracted, so the negation
-    ;; should still block propagation.
-    (is (empty? (query session-with-partial-retraction
-                       not-cold-query)))))
-
-(deftest negation-truth-maintenance
-  (let [make-hot (dsl/parse-rule [[WindSpeed]] ; Hack to only insert item on rule activation.
-                                 (insert! (->Temperature 100 "MCI")))
-
-        not-hot (dsl/parse-rule [[:not [Temperature (> temperature 80)]]]
-                                (insert! (->Cold 0)))
-
-        cold-query (dsl/parse-query [] [[?c <- Cold]])
-
-        session (-> (mk-session [make-hot not-hot cold-query] :cache false)
-                    (fire-rules))]
-
-    ;; The cold fact should exist because nothing matched the negation.
-    (is (= [{:?c (->Cold 0)}] (query session cold-query)))
-
-    ;; The cold fact should be retracted because inserting this
-    ;; triggers an insert that matches the negation.
-    (is (empty? (-> session
-                    (insert (->WindSpeed 100 "MCI"))
-                    (fire-rules)
-                    (query cold-query))))
-
-    ;; The cold fact should exist again because we are indirectly retracting
-    ;; the fact that matched the negation originially
-    (is (= [{:?c (->Cold 0)}]
-           (-> session
-               (insert (->WindSpeed 100 "MCI"))
-               (fire-rules)
-               (retract (->WindSpeed 100 "MCI"))
-               (fire-rules)
-               (query cold-query))))))
-
-(deftest test-negation-with-other-conditions
-  (let [windy-but-not-cold-query (dsl/parse-query [] [[WindSpeed (> windspeed 30) (= ?w windspeed)]
-                                                      [:not [ Temperature (< temperature 20)]]])
-
-        session  (mk-session [windy-but-not-cold-query])
-
-        ;; Make it windy, so our query should indicate that.
-        session (-> session
-                    (insert (->WindSpeed 40 "MCI"))
-                    fire-rules)
-        windy-result  (set (query session windy-but-not-cold-query))
-
-        ;; Make it hot and windy, so our query should still succeed.
-        session (-> session
-                    (insert (->Temperature 80 "MCI"))
-                    fire-rules)
-        hot-and-windy-result (set (query session windy-but-not-cold-query))
-
-        ;; Make it cold, so our query should return nothing.
-        session (-> session
-                    (insert (->Temperature 10 "MCI"))
-                    fire-rules)
-        cold-result  (set (query session windy-but-not-cold-query))]
-
-
-    (is (= #{{:?w 40}} windy-result))
-    (is (= #{{:?w 40}} hot-and-windy-result))
-
-    (is (empty? cold-result))))
-
-(deftest test-negated-conjunction
-  (let [not-cold-and-windy (dsl/parse-query [] [[:not [:and
-                                                       [WindSpeed (> windspeed 30)]
-                                                       [Temperature (< temperature 20)]]]])
-
-        session  (mk-session [not-cold-and-windy])
-
-        session-with-data (-> session
-                              (insert (->WindSpeed 40 "MCI"))
-                              (insert (->Temperature 10 "MCI"))
-                              (fire-rules))]
-
-    ;; It is not cold and windy, so we should have a match.
-    (is (= #{{}}
-           (set (query session not-cold-and-windy))))
-
-    ;; Make it cold and windy, so there should be no match.
-    (is (empty? (query session-with-data not-cold-and-windy)))))
-
-(deftest test-negated-disjunction
-  (let [not-cold-or-windy (dsl/parse-query [] [[:not [:or [WindSpeed (> windspeed 30)]
-                                                          [Temperature (< temperature 20)]]]])
-
-        session  (mk-session [not-cold-or-windy])
-
-        session-with-temp (fire-rules (insert session (->WindSpeed 40 "MCI")))
-        session-retracted (fire-rules (retract session-with-temp (->WindSpeed 40 "MCI")))]
-
-    ;; It is not cold and windy, so we should have a match.
-    (is (= #{{}}
-           (set (query session not-cold-or-windy))))
-
-    ;; Make it cold and windy, so there should be no match.
-    (is (empty? (query session-with-temp not-cold-or-windy)))
-
-    ;; Retract the added fact and ensure we now match something.
-    (is (= #{{}}
-           (set (query session-retracted not-cold-or-windy))))))
-
-(deftest test-complex-negation
-  (let [cold-not-match-temp
-        (dsl/parse-query []
-                         [[:not [:and
-                                 [?t <- Temperature]
-                                 [Cold (= temperature (:temperature ?t))]]]])
-
-        negation-with-prior-bindings
-        (dsl/parse-query []
-                         [[WindSpeed (= ?l location)]
-                          [:not [:and
-                                 [?t <- Temperature (= ?l location)]
-                                 [Cold (= temperature (:temperature ?t))]]]])
-
-        nested-negation-with-prior-bindings
-        (dsl/parse-query []
-                         [[WindSpeed (= ?l location)]
-                          [:not [:and
-                                 [?t <- Temperature (= ?l location)]
-                                 [:not [Cold (= temperature (:temperature ?t))]]]]])
-
-        object-query (dsl/parse-query [] [[?o <- Object]])
-
-        s (mk-session [cold-not-match-temp object-query] :cache false)
-        s-with-prior (mk-session [negation-with-prior-bindings object-query] :cache false)
-        s-with-nested (mk-session [nested-negation-with-prior-bindings object-query] :cache false)
-
-        ;; Validate that no system types can match a user-provided production.  We use Object to make
-        ;; the most general user-provided production possible.  See issue 149 for discussion of the issue
-        ;; that caused internal facts, specifically NegationResult, to be used in these test cases.
-        no-system-types? (fn [session]
-                           (not-any? (fn [fact] (instance? ISystemFact fact))
-                                     (as-> session x
-                                       (query x object-query)
-                                       (map :?o x))))]
-
-    ;; Should not match when negation is met.
-    (let [end-session (-> s
-                          (insert (->Temperature 10 "MCI")
-                                  (->Cold 10))
-                          (fire-rules))]
-      (is (empty? (query end-session cold-not-match-temp)))
-      (is (no-system-types? end-session)))
-
-    ;; Should have result if only a single item matched.
-    (let [end-session (-> s
-                          (insert (->Temperature 10 "MCI"))
-                          (fire-rules))]
-      (is (= [{}]
-             (query end-session cold-not-match-temp)))
-      (is (no-system-types? end-session)))
-
-    ;; Test previous binding is visible.
-    (let [end-session (fire-rules s-with-prior)]
-      (is (empty? (-> s-with-prior
-                      (fire-rules)
-                      (query negation-with-prior-bindings))))
-      (is (no-system-types? end-session)))
-
-    ;; Should have result since negation does not match.
-    (let [end-session (-> s-with-prior
-                          (insert (->WindSpeed 10 "MCI")
-                                  (->Temperature 10 "ORD")
-                                  (->Cold 10))
-                          (fire-rules))]
-      (is (= [{:?l "MCI"}]
-             (query end-session negation-with-prior-bindings)))
-      (is (no-system-types? end-session)))
-
-    ;; No result because negation matches.
-    (let [end-session (-> s-with-prior
-                          (insert (->WindSpeed 10 "MCI")
-                                  (->Temperature 10 "MCI")
-                                  (->Cold 10))
-                          (fire-rules))]
-      (is (empty? (query end-session negation-with-prior-bindings)))
-      (is (no-system-types? end-session)))
-
-    ;; Has nothing because the cold does not match the nested negation,
-    ;; so the :and is true and is negated at the top level.
-    (let [end-session (-> s-with-nested
-                          (insert (->WindSpeed 10 "MCI")
-                                  (->Temperature 10 "MCI")
-                                  (->Cold 20))
-                          (fire-rules))]
-      (is (empty?
-           (query end-session nested-negation-with-prior-bindings)))
-      (is (no-system-types? end-session)))
-
-    ;; Match the nested negation, which is then negated again at the higher level,
-    ;; so this rule matches.
-    (let [end-session (-> s-with-nested
-                          (insert (->WindSpeed 10 "MCI")
-                                  (->Temperature 10 "MCI")
-                                  (->Cold 10))
-                          (fire-rules))]
-      (is (= [{:?l "MCI"}]
-             (query end-session nested-negation-with-prior-bindings)))
-      (is (no-system-types? end-session)))
-
-    ;; Match the nested negation for location ORD but not for MCI.
-    ;; See https://github.com/cerner/clara-rules/issues/304
-    (let [end-session (-> s-with-nested
-                          (insert
-                           (->WindSpeed 10 "MCI")
-                           (->Temperature 10 "MCI")
-                           (->Cold 20)
-                           (->WindSpeed 20 "ORD")
-                           (->Temperature 20 "ORD"))
-                          (fire-rules))]
-
-      (is (= [{:?l "ORD"}]
-             (query end-session nested-negation-with-prior-bindings)))
-      (is (no-system-types? end-session)))))
-
-(deftest test-complex-negation-custom-type
-  (let [cold-not-match-temp
-        (dsl/parse-query []
-                         [[:not [:and
-                                 [?t <- :temperature]
-                                 [:cold [{temperature :temperature}] (= temperature (:temperature ?t))]]]])
-
-        s (mk-session [cold-not-match-temp] :cache false :fact-type-fn :type)]
-
-    (is (= [{}]
-           (-> s
-               (fire-rules)
-               (query cold-not-match-temp))))
-
-    ;; Should not match when negation is met.
-    (is (empty? (-> s
-                    (insert {:type :temperature :temperature 10}
-                            {:type :cold :temperature 10})
-                    (fire-rules)
-                    (query cold-not-match-temp))))
-
-    ;; Should have result if only a single item matched.
-    (is (= [{}]
-           (-> s
-               (insert {:type :temperature :temperature 10})
-               (fire-rules)
-               (query cold-not-match-temp))))))
 
 (deftest test-negation-with-complex-retractions
   (let [;; Non-blocked rule, where "blocked" means there is a
@@ -1019,7 +693,8 @@
            (keys (:id-to-node rulebase2))))
 
     ;; Ensure there are beta and production nodes as expected.
-    (is (= 4 (count (:id-to-node rulebase))))))
+    ;; 2 alpha-nodes, 2 root-join nodes, and 2 production nodes
+    (is (= 6 (count (:id-to-node rulebase))))))
 
 (deftest test-simple-test
   (let [distinct-temps-query (dsl/parse-query [] [[Temperature (< temperature 20) (= ?t1 temperature)]
@@ -1283,7 +958,9 @@
         cold-windy-query (dsl/parse-query [] [[Temperature (< temperature 20) (= ?t temperature)]
                                               [WindSpeed (> windspeed 25)]])
 
-        beta-graph (com/to-beta-graph #{cold-query cold-windy-query})]
+        beta-graph (com/to-beta-graph #{cold-query cold-windy-query} (let [x (atom 0)]
+                                                                       (fn []
+                                                                         (swap! x inc))))]
 
     ;; The above rules should share a root condition, so there are
     ;; only two distinct conditions in our network, plus the root node.
@@ -1756,7 +1433,7 @@
         s (mk-session [q])]
 
     ;; Mostly just ensuring the rulebase was compiled successfully.
-    (is (== 3
+    (is (== 4 ;; 1 alpha-node, 2 accumulate nodes, and 1 query node
             (-> s
                 .rulebase
                 :id-to-node
@@ -1843,7 +1520,7 @@
                                    (fire-rules)))
 
         listeners-from-trace (fn [e] (mapcat :listeners
-                                             (get-all-ex-data e)))]
+                                             (tu/get-all-ex-data e)))]
     (try
       (run-session-traced)
       (is false "Running the rules in this test should cause an exception.")

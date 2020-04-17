@@ -32,34 +32,22 @@
    avoid creating multiple object instances for the same node."
   (ThreadLocal.))
 
-(def ^:internal ^ThreadLocal compile-expr-fn
-  "Similar to what is done in clara.rules.compiler, this is a function used to compile
-   expressions used in nodes of the rulebase network.  A common function would cache
-   evaluated expressions by node-id and expression form to avoid duplicate evalutation
-   of the same expressions."
+(def ^:internal ^ThreadLocal node-fn-cache
+  "A cache for holding the fns used to reconstruct the nodes. Only applicable during read time, specifically
+   this will be bound to a Map of [<node-id> <field-name>] to IFn before the rulebase is deserialized. While the
+   rulebase is deserialized the nodes will reference this cache to repopulate their fns."
   (ThreadLocal.))
 
-(defn- add-node-fn [node fn-key meta-key]
+(defn- add-node-fn [node fn-key expr-key]
   (assoc node
          fn-key
-         ((.get compile-expr-fn) (:id node) (meta-key (meta node)))))
+         (first (get (.get node-fn-cache) [(:id node) expr-key]))))
 
 (defn add-rhs-fn [node]
-  ;; The RHS expression may need to be compiled within the namespace scope of specifically declared
-  ;; :ns-name.  The LHS expressions do not (currently) need or support this path.
-  ;; See https://github.com/cerner/clara-rules/issues/178 for more details.
-  (with-bindings (if-let [ns (some-> node
-                                     :production
-                                     :ns-name
-                                     the-ns)]
-                   {#'*ns* ns}
-                   {})
-    (add-node-fn node :rhs :action-expr)))
+  (add-node-fn node :rhs :action-expr))
 
 (defn add-alpha-fn [node]
-  ;; AlphaNode's do not have node :id's right now since they don't
-  ;; have any memory specifically associated with them.
-  (assoc node :activation (com/try-eval (:alpha-expr (meta node)))))
+  (add-node-fn node :activation :alpha-expr))
 
 (defn add-join-filter-fn [node]
   (add-node-fn node :join-filter-fn :join-filter-expr))
@@ -69,8 +57,7 @@
 
 (defn add-accumulator [node]
   (assoc node
-         :accumulator (((.get compile-expr-fn) (:id node)
-                                          (:accum-expr (meta node)))
+         :accumulator ((first (get (.get node-fn-cache) [(:id node) :accum-expr]))
                        (:env node))))
 
 (defn node-id->node
@@ -85,48 +72,48 @@
     (vswap! (.get node-id->node-cache) assoc node-id node))
   node)
 
-(def ^:internal ^ThreadLocal clj-record-holder
+(def ^:internal ^ThreadLocal clj-struct-holder
   "A cache for writing and reading Clojure records.  At write time, an IdentityHashMap can be
-   used to keep track of repeated references to the same record object instance occurring in
+   used to keep track of repeated references to the same object instance occurring in
    the serialization stream.  At read time, a plain ArrayList (mutable and indexed for speed)
    can be used to add records to when they are first seen, then look up repeated occurrences
    of references to the same record instance later."
   (ThreadLocal.))
 
-(defn clj-record-fact->idx
-  "Gets the numeric index for the given fact from the clj-record-holder."
+(defn clj-struct->idx
+  "Gets the numeric index for the given struct from the clj-struct-holder."
   [fact]
-  (-> clj-record-holder
+  (-> clj-struct-holder
     ^Map (.get)
     (.get fact)))
 
-(defn clj-record-holder-add-fact-idx!
-  "Adds the fact to the clj-record-holder with a new index.  This can later be retrieved
-   with clj-record-fact->idx."
+(defn clj-struct-holder-add-fact-idx!
+  "Adds the fact to the clj-struct-holder with a new index.  This can later be retrieved
+   with clj-struct->idx."
   [fact]
   ;; Note the values will be int type here.  This shouldn't be a problem since they
   ;; will be read later as longs and both will be compatible with the index lookup
   ;; at read-time.  This could have a cast to long here, but it would waste time
   ;; unnecessarily.
-  (-> clj-record-holder
+  (-> clj-struct-holder
     ^Map (.get)
-    (.put fact (-> clj-record-holder
+    (.put fact (-> clj-struct-holder
                  ^Map (.get)
                  (.size)))))
 
-(defn clj-record-idx->fact
-  "The reverse of clj-record-fact->idx.  Returns a fact for the given index found
-   in clj-record-holder."
+(defn clj-struct-idx->obj
+  "The reverse of clj-struct->idx.  Returns an object for the given index found
+   in clj-struct-holder."
   [id]
-  (-> clj-record-holder
+  (-> clj-struct-holder
     ^List (.get)
     (.get id)))
 
-(defn clj-record-holder-add-fact!
-  "The reverse of clj-record-holder-add-fact-idx!.  Adds the fact to the clj-record-holder
+(defn clj-struct-holder-add-obj!
+  "The reverse of clj-struct-holder-add-fact-idx!.  Adds the object to the clj-struct-holder
    at the next available index."
   [fact]
-  (-> clj-record-holder
+  (-> clj-struct-holder
     ^List (.get)
     (.add fact))
   fact)
@@ -562,6 +549,10 @@
    * :base-rulebase - A rulebase to attach to the session being deserialized.  The assumption here is that
      the session was serialized without the rulebase, i.e. :with-rulebase? = false, so it needs a rulebase
      to be 'attached' back onto it to be usable.
+
+   * :forms-per-eval - The maximum number of expressions that will be evaluated per call to eval.
+     Larger batch sizes should see better performance compared to smaller batch sizes.
+     Defaults to 5000, see clara.rules.compiler/forms-per-eval-default for more information.
 
    Options for the rulebase semantics that are documented at clara.rules/mk-session include:
 

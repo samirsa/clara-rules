@@ -1,7 +1,22 @@
 This is a history of changes to clara-rules.
 
-### 0.19.0-SNAPSHOT
+# 0.20.0
+* Add a flag to omit compilation context (used by the durability layer) after Session compilation to save space when not needed. Defaults to true. [issue 422](https://github.com/cerner/clara-rules/issues/422)
+* Correct duplicate bindings within the same condition. See [issue 417](https://github.com/cerner/clara-rules/issues/417)
+* Correct sharing of nodes with different parents. See [issue 433](https://github.com/cerner/clara-rules/issues/433) 
+
+# 0.19.1
+* Added a new field to the clara.rules.engine/Accumulator record.  This could be a breaking change for any user durability implementations with low-level performance optimizations.  See [PR 410](https://github.com/cerner/clara-rules/pull/410) for details.
+* Performance improvements for :exists conditions.  See [issue 298](https://github.com/cerner/clara-rules/issues/298).
+* Decrease memory usage post deserialization (Durability). See [Issue 419](https://github.com/cerner/clara-rules/issues/419)
+* Added a new function that returns the number of times a rule was interacted with as a proxy for rules that may be the cause of performance problems.  This function requires information from the [tracing listener](http://www.clara-rules.org/docs/listeners/) to work.  See [issue 344](https://github.com/cerner/clara-rules/issues/344) for details.
+
+### 0.19.0
 * Remove a warning about `qualified-keyword?` being replaced when using Clojure 1.9.
+* Batch evaluation of node expressions for better compilation performance. See [issue 381](https://github.com/cerner/clara-rules/issues/381).
+* Remove unneeded use of get-in to improve performance. See [issue 402](https://github.com/cerner/clara-rules/issues/402).
+* Fix issue in test conditions where there is a previous binding. See [issue 357](https://github.com/cerner/clara-rules/issues/357).
+* Fix incorrect unification logic caused by differing equality semantics between Java and Clojure. See [issue 393](https://github.com/cerner/clara-rules/issues/393).
 
 ### 0.18.0
 * Remove unnecessary memory operations from ProductionNode to optimize performance.  Remove :rule-matches in session inspection that did not cause logical insertions and add a new optional feature to return all rule matches, regardless of what their RHS did or whether they were retracted. Add a new listener and tracing method fire-activation!. These changes are moderately non-passive with respect to listening, tracing, and session inspection but are otherwise passive.  See [issue 386](https://github.com/cerner/clara-rules/issues/386) for details.

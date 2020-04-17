@@ -14,7 +14,7 @@
 ;; The accumulator is a Rete extension to run an accumulation (such as sum, average, or similar operation)
 ;; over a collection of values passing through the Rete network. This object defines the behavior
 ;; of an accumulator. See the AccumulateNode for the actual node implementation in the network.
-(defrecord Accumulator [initial-value reduce-fn combine-fn convert-return-fn])
+(defrecord Accumulator [initial-value retract-fn reduce-fn combine-fn convert-return-fn])
 
 ;; A Rete-style token, which contains two items:
 ;; * matches, a vector of [fact, node-id] tuples for the facts and corresponding nodes they matched.
@@ -524,7 +524,7 @@
 ;; Record representing alpha nodes in the Rete network,
 ;; each of which evaluates a single condition and
 ;; propagates matches to its children.
-(defrecord AlphaNode [env children activation]
+(defrecord AlphaNode [id env children activation fact-type]
 
   IAlphaActivate
   (alpha-activate [node facts memory transport listener]

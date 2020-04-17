@@ -1,4 +1,4 @@
-(defproject com.cerner/clara-rules "0.19.0-SNAPSHOT"
+(defproject com.cerner/clara-rules "0.21.0-SNAPSHOT"
   :description "Clara Rules Engine"
   :url "https://github.com/cerner/clara-rules"
   :license {:name "Apache License Version 2.0"
@@ -6,10 +6,13 @@
   :dependencies [[org.clojure/clojure "1.7.0"]
                  [prismatic/schema "1.1.6"]]
   :profiles {:dev {:dependencies [[org.clojure/math.combinatorics "0.1.3"]
-                                  [org.clojure/data.fressian "0.2.1"]]}
+                                  [org.clojure/data.fressian "0.2.1"]]
+                   :java-source-paths ["src/test/java"]
+                   :global-vars {*warn-on-reflection* true}}
              :provided {:dependencies [[org.clojure/clojurescript "1.7.170"]]}
              :recent-clj {:dependencies [^:replace [org.clojure/clojure "1.9.0"]
-                                         ^:replace [org.clojure/clojurescript "1.9.946"]]}}
+                                         ^:replace [org.clojure/clojurescript "1.9.946"]]}
+             :java9 {:jvm-opts ["--add-modules=java.xml.bind"]}}
   :plugins [[lein-codox "0.10.3" :exclusions [org.clojure/clojure
                                               org.clojure/clojurescript]]
             [lein-javadoc "0.3.0" :exclusions [org.clojure/clojure
@@ -62,14 +65,21 @@
 
   :repl-options {;; The large number of ClojureScript tests is causing long compilation times
                  ;; to start the REPL.
-                 :timeout 120000}
+                 :timeout 180000}
   
   ;; Factoring out the duplication of this test selector function causes an error,
   ;; perhaps because Leiningen is using this as uneval'ed code.
   ;; For now just duplicate the line.
   :test-selectors {:default (complement (fn [x]
-                                          (some->> x :ns ns-name str (re-matches #"^clara\.generative.*"))))
-                   :generative (fn [x] (some->> x :ns ns-name str (re-matches #"^clara\.generative.*")))}
+                                          (let [blacklisted-packages #{"generative" "performance"}
+                                                patterns (into []
+                                                           (comp
+                                                             (map #(str "^clara\\." % ".*"))
+                                                             (interpose "|"))
+                                                           blacklisted-packages)]
+                                            (some->> x :ns ns-name str (re-matches (re-pattern (apply str patterns)))))))
+                   :generative (fn [x] (some->> x :ns ns-name str (re-matches #"^clara\.generative.*")))
+                   :performance (fn [x] (some->> x :ns ns-name str (re-matches #"^clara\.performance.*")))}
   
   :scm {:name "git"
         :url "https://github.com/cerner/clara-rules"}
